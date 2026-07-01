@@ -1,0 +1,31 @@
+# ── ROM images — НИКОГДА / never commit the game image ──
+*.gen
+*.bin
+*.smd
+*.md5
+
+# ── Nuked-OPN2 — качается отдельно (LGPL) / fetched separately ──
+ztextractor/opn2/ym3438.c
+ztextractor/opn2/ym3438.h
+ztextractor/opn2/libopn2.dylib
+ztextractor/opn2/libopn2.so
+
+# ── экспортируемые данные/артефакты (это содержимое ROM) / exported assets ──
+*.oztd
+*.png
+*.ppm
+*.wav
+oztds/
+renders/
+_shots/
+screens/
+snap/
+# …но README-скриншот трекаем / …but keep the README screenshot
+!docs/screenshot.png
+
+# ── python / os ──
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
