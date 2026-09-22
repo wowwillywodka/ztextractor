@@ -845,13 +845,11 @@ class FrameViewer(QWidget):
 # от 0x10E9BE до 0x116DBE = ровно 66 тайлов (совпадает с банком из zmap-tools).
 # Содержимое: взрывы/эффекты, оружие, аптечка, канистры, HUD-портреты солдата,
 # двери/лампы/огонь/кровь.
-# BZT: банк предметов = Items{N}ep.bin (по 33792б=66 тайлов на эпизод), адреса по
-# содержимому из дизасма (items_imgs). June ep1 0xC043E (ep2 0xEF88A, ep3 0x125182);
-# July ep1 0x9D7F8. Палитра — выбирается «из ROM» / зон (см. вкладку «Вся графика»).
+# BZT: банк предметов = Items{N}ep.bin (отдельный для каждой зоны; адрес и точный
+# размер берутся из дескриптора зоны через zonemod.parse_zones). Здесь остаётся
+# только общий банк ZT; прототипы больше не должны молча показывать лишь зону 1.
 OBJECT_BANKS = {
     "Zero Tolerance": (0x10E9BE, 66),
-    "Beyond Zero Tolerance (прототип 1995-06-23)": (0xC043E, 66),
-    "Beyond Zero Tolerance (прототип 1995-07-14)": (0x9D7F8, 66),
 }
 OBJ_TILE_BYTES = 512
 OBJ_TEX = 32
@@ -991,6 +989,7 @@ class ObjectViewer(QWidget):
         self.main = main
         self._hover_off: Optional[int] = None
         self._bank = None   # (start, count) для текущей версии — гасит хвост за банком
+        self._zone_banks = []
         self._cell = OBJ_TEX  # размер ячейки сетки (32 или OBJ_STRETCH_CELL)
 
         self.view = TileView()
@@ -1010,6 +1009,13 @@ class ObjectViewer(QWidget):
         self.start = _hex_spin(0xFFFFFF, 0x10E9BE)
         self.start.valueChanged.connect(self._render)
         form.addRow(tr("Начало банка:", "Bank start:"), self.start)
+
+        self.zone_label = QLabel(tr("Зона:", "Zone:"))
+        self.zone_combo = QComboBox()
+        self.zone_combo.currentIndexChanged.connect(self._zone_changed)
+        form.addRow(self.zone_label, self.zone_combo)
+        self.zone_label.setVisible(False)
+        self.zone_combo.setVisible(False)
 
         nud = QHBoxLayout()
         for label, delta in [("−512", -512), ("−32", -32), ("−2", -2),
@@ -1100,9 +1106,27 @@ class ObjectViewer(QWidget):
         if rom is None:
             return
         bank = _object_bank(rom.version)
-        self._bank = bank
         self.start.setMaximum(max(0, rom.size - 1))
         self.pal_offset.setMaximum(max(0, rom.size - 2))
+        zones = zonemod.parse_zones(rom.data, rom.version)
+        self._zone_banks = [
+            {"index": z["index"], "bank": z["items"], "palette": z["palA"]}
+            for z in zones if z.get("items")
+        ]
+        self.zone_combo.blockSignals(True)
+        self.zone_combo.clear()
+        for z in self._zone_banks:
+            start, count = z["bank"]["offset"], z["bank"]["count"]
+            self.zone_combo.addItem(
+                tr(f"Зона {z['index'] + 1} — 0x{start:06X}, {count} тайл.",
+                   f"Zone {z['index'] + 1} — 0x{start:06X}, {count} tiles"), z["index"])
+        self.zone_combo.setCurrentIndex(0 if self._zone_banks else -1)
+        self.zone_combo.blockSignals(False)
+        has_zone_banks = bool(self._zone_banks)
+        self.zone_label.setVisible(has_zone_banks)
+        self.zone_combo.setVisible(has_zone_banks)
+        if has_zone_banks:
+            bank = self._zone_banks[0]["bank"]
         # палитра по умолчанию по версии (для ручного офсета): ZT 0x20F2, BZT — иные
         objpal = {"Beyond Zero Tolerance (прототип 1995-06-23)": 0xB9CBE,
                   "Beyond Zero Tolerance (прототип 1995-07-14)": 0x97BA0}
@@ -1120,7 +1144,7 @@ class ObjectViewer(QWidget):
         self.pal_mode.blockSignals(True)
         self.pal_mode.clear()
         if bzt:
-            for z in (zonemod.parse_zones(rom.data, rom.version) or []):
+            for z in zones:
                 pa = z["palA"]
                 for ln in range(4):
                     self.pal_mode.addItem(
@@ -1141,29 +1165,54 @@ class ObjectViewer(QWidget):
         di = self.pal_mode.findData(defoff if defoff is not None else zt_def)
         self.pal_mode.setCurrentIndex(di if di >= 0 else 0)
         self.pal_mode.blockSignals(False)
-        if bank is not None:
-            start, count = bank
-            cols = self.cols.value()
-            self.start.blockSignals(True)
-            self.rows.blockSignals(True)
-            self.start.setValue(start)
-            self.rows.setValue(-(-count // cols))   # ceil — ровно весь банк
-            self.rows.blockSignals(False)
-            self.start.blockSignals(False)
-            self.info.setText(tr(
-                f"<b>{version_label(rom.version)}</b><br>Банк объектов: 0x{start:06X}, {count} тайлов 32×32<br>"
-                "Эффекты, оружие, аптечка, канистры, HUD-портреты, двери/лампы/огонь.<br>"
-                "Наведите курсор — смещение тайла; рамкой — выделение для экспорта.",
-                f"<b>{version_label(rom.version)}</b><br>Object bank: 0x{start:06X}, {count} tiles 32×32<br>"
-                "Effects, weapons, medkit, canisters, HUD portraits, doors/lamps/fire.<br>"
-                "Hover for the tile offset; drag a box to select for export."))
-        else:
-            self.info.setText(tr(
-                f"<b>{version_label(rom.version)}</b><br>Адрес банка объектов для этой версии пока не задан — "
-                "укажите «Начало банка» вручную.",
-                f"<b>{version_label(rom.version)}</b><br>The object-bank address is not set for this version yet — "
-                "enter «Bank start» manually."))
+        self._set_bank(bank, self._zone_banks[0] if has_zone_banks else None)
         self.view.set_zoom(self.zoom.value())
+        self._render()
+
+    def _set_bank(self, bank, zone=None) -> None:
+        """Показать банк; у прототипов ``zone`` привязывает его к зоне/палитре."""
+        if isinstance(bank, dict):
+            bank = (bank["offset"], bank["count"])
+        self._bank = bank
+        if bank is None:
+            self.info.setText(tr(
+                f"<b>{version_label(self.main.rom.version)}</b><br>Адрес банка объектов для этой версии пока не задан — "
+                "укажите «Начало банка» вручную.",
+                f"<b>{version_label(self.main.rom.version)}</b><br>The object-bank address is not set for this version yet — "
+                "enter «Bank start» manually."))
+            return
+        start, count = bank
+        cols = self.cols.value()
+        self.start.blockSignals(True)
+        self.rows.blockSignals(True)
+        self.start.setValue(start)
+        self.rows.setValue(-(-count // cols))   # ceil — ровно весь банк
+        self.rows.blockSignals(False)
+        self.start.blockSignals(False)
+        scope_ru = (f"Банк предметов/декораций зоны {zone['index'] + 1}"
+                    if zone else "Банк объектов")
+        scope_en = (f"Zone {zone['index'] + 1} item/decor bank"
+                    if zone else "Object bank")
+        self.info.setText(tr(
+            f"<b>{version_label(self.main.rom.version)}</b><br>{scope_ru}: 0x{start:06X}, {count} тайлов 32×32<br>"
+            "Эффекты, оружие, аптечка, канистры, HUD-портреты, двери/лампы/огонь.<br>"
+            "Наведите курсор — смещение тайла; рамкой — выделение для экспорта.",
+            f"<b>{version_label(self.main.rom.version)}</b><br>{scope_en}: 0x{start:06X}, {count} tiles 32×32<br>"
+            "Effects, weapons, medkit, canisters, HUD portraits, doors/lamps/fire.<br>"
+            "Hover for the tile offset; drag a box to select for export."))
+
+    def _zone_changed(self) -> None:
+        """Переключить BZT на банк предметов/декораций и палитру той же зоны."""
+        index = self.zone_combo.currentData()
+        zone = next((z for z in self._zone_banks if z["index"] == index), None)
+        if zone is None:
+            return
+        self._set_bank(zone["bank"], zone)
+        palette_index = self.pal_mode.findData(zone["palette"])
+        if palette_index >= 0:
+            self.pal_mode.blockSignals(True)
+            self.pal_mode.setCurrentIndex(palette_index)
+            self.pal_mode.blockSignals(False)
         self._render()
 
     def _palette(self) -> List[pal.RGB]:
@@ -2110,7 +2159,7 @@ def _wall_bank(version: str):
 # Определения ячеек карты (из ztedit.ini [CellDefs]/[BCellDefs]): cell_id → (тип, имя). Тип: 0=пусто,
 # 1=стена, 2-5=углы, 6=гор.дверь, 7=верт.дверь, 9=старт, 10=враг, 11=?, 12=оружие, 13=предмет,
 # 14=лестн.стены, 15=РАЗРУШАЕМАЯ стена, 16=декор/труп, 8=окружение/спец. BZT — переопределения поверх ZT.
-CELL_DEFS_ZT = {0: (0, 'Empty cell'), 1: (1, 'Wall'), 2: (2, 'Upper-right corner'), 3: (3, 'Lower-right corner'), 4: (4, 'Lower-left corner'), 5: (5, 'Upper-left corner'), 6: (6, 'Horizontal door'), 7: (7, 'Vertical door'), 8: (8, 'Environment: Bright'), 9: (8, 'Environment: Dim'), 10: (8, 'Environment: Haze'), 11: (8, 'Environment: No ceiling'), 12: (14, 'Stair walls - up, bottom'), 13: (14, 'Stair walls - interst., up'), 14: (14, 'Stair walls - transition, bottom'), 15: (14, 'Stair walls - interst., down'), 16: (14, 'Stair walls - down, bottom'), 17: (14, 'Stair central walls - bottom'), 18: (8, 'Stairs - up, bottom'), 19: (8, 'Stairs entrance - bottom'), 20: (8, 'Stairs - down, bottom'), 21: (8, 'Stairs interstorey - up'), 22: (8, 'Stairs interstorey - down'), 23: (8, 'Stairs transition - bottom'), 24: (8, 'Flame'), 25: (13, 'Bio Scanner'), 26: (12, 'Mine'), 27: (13, 'Bulletproof vest'), 28: (13, 'Fire extinguisher'), 29: (13, 'Fireproof suit'), 30: (13, 'Flashlight'), 31: (12, 'Hand grenade'), 32: (12, 'Handgun'), 33: (13, 'Night vision'), 34: (12, 'Laser aimed gun'), 35: (12, 'Rocket launcher'), 36: (12, 'Shotgun'), 37: (13, 'Medipack'), 38: (8, 'Camera'), 39: (8, 'Invisible snipers (1)'), 40: (8, 'Invisible snipers (2)'), 41: (10, 'Former Human Sergeant'), 42: (10, 'Former Human'), 43: (10, 'Imp'), 44: (16, 'Enemy corpse'), 45: (16, 'Fake horizontal door'), 46: (16, 'Fake Vertical door'), 47: (8, 'Enemy blocker'), 48: (14, 'Elevator walls'), 49: (8, 'Elevator area - left'), 50: (8, 'Elevator - up, left'), 51: (8, 'Elevator - down, left'), 52: (8, 'Elevator - up/down, left'), 53: (16, 'Burnt remains'), 54: (12, 'Pulse laser'), 55: (16, 'Tree 1'), 56: (14, 'Stair walls - up, top'), 57: (14, 'Stair walls - transition, top'), 58: (14, 'Stair walls - down, top'), 59: (14, 'Stair central walls - top'), 60: (8, 'Stairs - up, top'), 61: (8, 'Stairs entrance - top'), 62: (8, 'Stairs - down, top'), 63: (8, 'Stairs transition - top'), 64: (14, 'Stair walls (12)'), 65: (14, 'Stair walls (13)'), 66: (14, 'Stair walls (14)'), 67: (14, 'Stair walls (15)'), 68: (8, 'Stairs 10'), 69: (8, 'Stairs 11'), 70: (8, 'Stairs 12'), 71: (8, 'Stairs 13'), 72: (14, 'Stair walls (16)'), 73: (14, 'Stair walls (17)'), 74: (14, 'Stair walls (18)'), 75: (14, 'Stair walls (19)'), 76: (8, 'Stairs 14'), 77: (8, 'Stairs 15'), 78: (8, 'Stairs 16'), 79: (8, 'Stairs 17'), 80: (8, 'Elevator area - right'), 81: (8, 'Elevator - up, right'), 82: (8, 'Elevator - down, right'), 83: (8, 'Elevator - up/down, right'), 84: (8, 'Elevator area - bottom'), 85: (8, 'Elevator - up, bottom'), 86: (8, 'Elevator - down, bottom'), 87: (8, 'Elevator - up/down, bottom'), 88: (8, 'Elevator area - top'), 89: (8, 'Elevator - up, top'), 90: (8, 'Elevator - down, top'), 91: (8, 'Elevator - up/down, top'), 92: (16, 'Tree 1'), 93: (16, 'Floor lamp'), 94: (16, 'Table'), 95: (16, 'Bar chair'), 96: (16, 'Metal pillar'), 97: (16, 'Concrete pillar'), 98: (16, 'Flashing lamp'), 99: (16, 'Lamp'), 100: (16, 'Halfsphere lamp'), 101: (10, 'Hydaca'), 102: (10, 'Revenant'), 103: (10, 'Boss 1'), 104: (10, 'Pink dog'), 105: (10, 'Former Human SF'), 106: (10, 'Boss 3'), 107: (10, 'Boss 2'), 108: (16, 'Corpse'), 117: (16, 'Lamp 2'), 118: (16, 'Metal pillar 2'), 119: (9, 'Player start'), 120: (16, 'Floor fan'), 121: (15, 'Shootable wall 1'), 122: (11, 'Unknown'), 123: (15, 'Shootable wall 2'), 124: (11, 'Unknown'), 125: (11, 'Unknown'), 126: (11, 'Unknown'), 127: (15, 'Shootable wall 3'), 128: (1, 'Wall'), 129: (8, 'Episode end'), 130: (12, 'Flamethrower'), 131: (16, 'Fake horizontal door'), 132: (16, 'Fake Vertical door')}
+CELL_DEFS_ZT = {0: (0, 'Empty cell'), 1: (1, 'Wall'), 2: (2, 'Upper-right corner'), 3: (3, 'Lower-right corner'), 4: (4, 'Lower-left corner'), 5: (5, 'Upper-left corner'), 6: (6, 'Horizontal door'), 7: (7, 'Vertical door'), 8: (8, 'Environment: Bright'), 9: (8, 'Environment: Dim'), 10: (8, 'Environment: Haze'), 11: (8, 'Environment: No ceiling'), 12: (14, 'Stair walls - up, bottom'), 13: (14, 'Stair walls - interst., up'), 14: (14, 'Stair walls - transition, bottom'), 15: (14, 'Stair walls - interst., down'), 16: (14, 'Stair walls - down, bottom'), 17: (14, 'Stair central walls - bottom'), 18: (8, 'Stairs - up, bottom'), 19: (8, 'Stairs entrance - bottom'), 20: (8, 'Stairs - down, bottom'), 21: (8, 'Stairs interstorey - up'), 22: (8, 'Stairs interstorey - down'), 23: (8, 'Stairs transition - bottom'), 24: (8, 'Flame'), 25: (13, 'Bio Scanner'), 26: (12, 'Mine'), 27: (13, 'Bulletproof vest'), 28: (13, 'Fire extinguisher'), 29: (13, 'Fireproof suit'), 30: (13, 'Flashlight'), 31: (12, 'Hand grenade'), 32: (12, 'Handgun'), 33: (13, 'Night vision'), 34: (12, 'Laser aimed gun'), 35: (12, 'Rocket launcher'), 36: (12, 'Shotgun'), 37: (13, 'Medipack'), 38: (8, 'Camera'), 39: (8, 'Invisible snipers (1)'), 40: (8, 'Invisible snipers (2)'), 41: (10, 'Former Human Sergeant'), 42: (10, 'Former Human'), 43: (10, 'Imp'), 44: (16, 'Sergeant corpse'), 45: (16, 'Fake horizontal door'), 46: (16, 'Fake Vertical door'), 47: (8, 'Enemy blocker'), 48: (14, 'Elevator walls'), 49: (8, 'Elevator area - left'), 50: (8, 'Elevator - up, left'), 51: (8, 'Elevator - down, left'), 52: (8, 'Elevator - up/down, left'), 53: (16, 'Burnt remains'), 54: (12, 'Pulse laser'), 55: (16, 'Tree 1'), 56: (14, 'Stair walls - up, top'), 57: (14, 'Stair walls - transition, top'), 58: (14, 'Stair walls - down, top'), 59: (14, 'Stair central walls - top'), 60: (8, 'Stairs - up, top'), 61: (8, 'Stairs entrance - top'), 62: (8, 'Stairs - down, top'), 63: (8, 'Stairs transition - top'), 64: (14, 'Stair walls (12)'), 65: (14, 'Stair walls (13)'), 66: (14, 'Stair walls (14)'), 67: (14, 'Stair walls (15)'), 68: (8, 'Stairs 10'), 69: (8, 'Stairs 11'), 70: (8, 'Stairs 12'), 71: (8, 'Stairs 13'), 72: (14, 'Stair walls (16)'), 73: (14, 'Stair walls (17)'), 74: (14, 'Stair walls (18)'), 75: (14, 'Stair walls (19)'), 76: (8, 'Stairs 14'), 77: (8, 'Stairs 15'), 78: (8, 'Stairs 16'), 79: (8, 'Stairs 17'), 80: (8, 'Elevator area - right'), 81: (8, 'Elevator - up, right'), 82: (8, 'Elevator - down, right'), 83: (8, 'Elevator - up/down, right'), 84: (8, 'Elevator area - bottom'), 85: (8, 'Elevator - up, bottom'), 86: (8, 'Elevator - down, bottom'), 87: (8, 'Elevator - up/down, bottom'), 88: (8, 'Elevator area - top'), 89: (8, 'Elevator - up, top'), 90: (8, 'Elevator - down, top'), 91: (8, 'Elevator - up/down, top'), 92: (16, 'Tree 1'), 93: (16, 'Floor lamp'), 94: (16, 'Table'), 95: (16, 'Bar chair'), 96: (16, 'Metal pillar'), 97: (16, 'Concrete pillar'), 98: (16, 'Flashing lamp'), 99: (16, 'Lamp'), 100: (16, 'Halfsphere lamp'), 101: (10, 'Hydaca'), 102: (10, 'Revenant'), 103: (10, 'Boss 1'), 104: (10, 'Pink dog'), 105: (10, 'Former Human SF'), 106: (10, 'Boss 3'), 107: (10, 'Boss 2'), 108: (16, 'Former Human corpse'), 109: (16, 'Imp corpse'), 110: (16, 'Hydaca corpse'), 111: (16, 'Revenant corpse'), 112: (16, 'Boss 1 corpse'), 113: (16, 'Pink dog corpse'), 114: (16, 'Former Human SF corpse'), 115: (16, 'Boss 3 corpse'), 116: (16, 'Boss 2 corpse'), 117: (16, 'Lamp 2'), 118: (16, 'Metal pillar 2'), 119: (9, 'Player start'), 120: (16, 'Floor fan'), 121: (15, 'Shootable wall 1'), 122: (11, 'Unknown'), 123: (15, 'Shootable wall 2'), 124: (11, 'Unknown'), 125: (11, 'Unknown'), 126: (11, 'Unknown'), 127: (15, 'Shootable wall 3'), 128: (1, 'Wall'), 129: (8, 'Episode end'), 130: (12, 'Flamethrower'), 131: (16, 'Fake horizontal door'), 132: (16, 'Fake Vertical door')}
 CELL_DEFS_BZT = {8: (10, 'Invisible alien'), 9: (10, 'Red alien 1'), 32: (12, 'Buligun'), 35: (12, 'Gunrock'), 36: (12, 'Rifle'), 39: (10, 'Red alien 2'), 40: (12, 'Glitchy weapon'), 41: (10, 'Red monster'), 42: (10, 'Pink monster'), 101: (10, 'Green alien'), 102: (10, 'Gray alien'), 121: (15, 'Shootable wall'), 130: (12, 'Fire dragon'), 133: (13, 'Medipack')}
 # типы ячеек со СТЕНОВОЙ графикой (показываем в режиме «Ячейки»): стена/углы/двери/лестницы/разруш.
 _WALL_CELL_TYPES = {1, 2, 3, 4, 5, 6, 7, 14, 15}

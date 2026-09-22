@@ -21,6 +21,9 @@ from .i18n import tr
 ZONE_STRIDE = 0x38
 BANKS_PER_ZONE = 12
 TEX_BYTES = 512  # размер одной текстуры 32×32 4bpp
+# В дескрипторе это 11-й графический указатель (+0x30): Items{N}ep.bin,
+# то есть общий для зоны банк предметов, оружия и декораций.
+ITEMS_BANK_SLOT = 10
 
 # version-substring -> (offset таблицы, число зон)
 ZONE_TABLES = {
@@ -56,8 +59,10 @@ def _hue_name(colors: List) -> str:
 def parse_zones(data: bytes, version: str) -> List[Dict]:
     """Список зон для версии.
 
-    Каждая зона: {index, palA, palB, banks}. banks — список словарей
+    Каждая зона: {index, palA, palB, banks, items}. ``banks`` — список словарей
     {offset, size, count} ТОЛЬКО для настоящих банков текстур (размер кратен 512).
+    ``items`` — такой же словарь для выделенного в дескрипторе банка предметов и
+    декораций этой зоны, либо ``None`` для неизвестной/повреждённой таблицы.
 
     Размер банка = расстояние до следующего указателя на графику во всей таблице
     (банки лежат в ROM встык). Мелкие записи (метатекстуры 0xA0, заголовки 0x0C)
@@ -115,5 +120,8 @@ def parse_zones(data: bytes, version: str) -> List[Dict]:
                 seen.add(b)
                 banks.append({"offset": b, "size": c * TEX_BYTES, "count": c})
         banks.sort(key=lambda x: -x["count"])  # главный банк стен — сверху
-        zones.append({"index": i, "palA": pal_a, "palB": pal_b, "banks": banks})
+        items_ptr = _long(data, z + 8 + 4 * ITEMS_BANK_SLOT)
+        items_bank = next((bank for bank in banks if bank["offset"] == items_ptr), None)
+        zones.append({"index": i, "palA": pal_a, "palB": pal_b,
+                      "banks": banks, "items": items_bank})
     return zones
